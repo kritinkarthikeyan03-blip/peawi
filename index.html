@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Spotify</title>
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+    body { background-color: #121212; color: #ffffff; height: 100vh; display: flex; flex-direction: column; }
+    .app { display: flex; flex-direction: column; height: 100vh; justify-content: space-between; }
+    header { padding: 20px; background-color: #000000; text-align: center; }
+    header h1 { color: #1db954; margin-bottom: 15px; font-size: 1.5rem; }
+    .search-box { display: flex; gap: 10px; max-width: 500px; margin: 0 auto; }
+    input { flex: 1; padding: 12px; border-radius: 20px; border: none; background: #282828; color: #fff; outline: none; font-size: 1rem; }
+    button { padding: 10px 20px; border-radius: 20px; border: none; background: #1db954; color: #000; font-weight: bold; cursor: pointer; }
+    main { flex: 1; overflow-y: auto; padding: 15px; }
+    .placeholder { text-align: center; color: #b3b3b3; margin-top: 50px; }
+    .track-card { display: flex; align-items: center; gap: 15px; background: #181818; padding: 10px; border-radius: 8px; margin-bottom: 10px; cursor: pointer; }
+    .track-card:active { background: #282828; }
+    .track-card img { width: 50px; height: 50px; border-radius: 4px; object-fit: cover; }
+    .track-details { flex: 1; }
+    .track-title { font-weight: bold; font-size: 0.95rem; margin-bottom: 4px; }
+    .track-artist { color: #b3b3b3; font-size: 0.8rem; }
+    footer.now-playing { display: flex; align-items: center; gap: 15px; background: #181818; padding: 12px 20px; border-top: 1px solid #282828; }
+    footer img { width: 50px; height: 50px; border-radius: 4px; }
+    .track-info { flex: 1; }
+    #nowPlayingTitle { font-weight: bold; font-size: 0.9rem; }
+    #nowPlayingArtist { color: #b3b3b3; font-size: 0.75rem; }
+    .control-btn { font-size: 1.2rem; background: #1db954; width: 40px; height: 40px; border-radius: 50%; display: flex; align-items: center; justify-content: center; }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <header>
+      <h1>Spotify</h1>
+      <div class="search-box">
+        <input type="text" id="searchInput" placeholder="Search songs..." />
+        <button id="searchBtn">Search</button>
+      </div>
+    </header>
+
+    <main id="resultsList">
+      <p class="placeholder">Search for your favorite track to start listening...</p>
+    </main>
+
+    <footer class="now-playing">
+      <img id="nowPlayingImg" src="https://upload.wikimedia.org/wikipedia/commons/1/19/Spotify_logo_without_text.svg" alt="Cover">
+      <div class="track-info">
+        <div id="nowPlayingTitle">No song playing</div>
+        <div id="nowPlayingArtist">-</div>
+      </div>
+      <button id="playPauseBtn" class="control-btn">▶</button>
+    </footer>
+  </div>
+
+  <audio id="audioPlayer" preload="metadata"></audio>
+
+  <script>
+    const audio = document.getElementById('audioPlayer');
+    const searchInput = document.getElementById('searchInput');
+    const searchBtn = document.getElementById('searchBtn');
+    const resultsList = document.getElementById('resultsList');
+    const playPauseBtn = document.getElementById('playPauseBtn');
+
+    const API_BASE = "https://pipedapi.kavin.rocks";
+
+    searchBtn.addEventListener('click', () => performSearch(searchInput.value));
+    searchInput.addEventListener('keypress', (e) => { if (e.key === 'Enter') performSearch(searchInput.value); });
+
+    async function performSearch(query) {
+      if (!query.trim()) return;
+      resultsList.innerHTML = '<p class="placeholder">Searching...</p>';
+      
+      try {
+        const res = await fetch(`${API_BASE}/search?q=${encodeURIComponent(query)}&filter=music_songs`);
+        const data = await res.json();
+        displayResults(data.items || []);
+      } catch (err) {
+        resultsList.innerHTML = '<p class="placeholder">Error fetching tracks. Try again.</p>';
+      }
+    }
+
+    function displayResults(tracks) {
+      resultsList.innerHTML = '';
+      tracks.forEach(track => {
+        const videoId = track.url.split('v=')[1];
+        const card = document.createElement('div');
+        card.className = 'track-card';
+        card.innerHTML = `
+          <img src="${track.thumbnail}" alt="art">
+          <div class="track-details">
+            <div class="track-title">${track.title}</div>
+            <div class="track-artist">${track.uploaderName}</div>
+          </div>
+        `;
+        card.onclick = () => playStream(videoId, track.title, track.uploaderName, track.thumbnail);
+        resultsList.appendChild(card);
+      });
+    }
+
+    async function playStream(videoId, title, artist, thumbnail) {
+      try {
+        const res = await fetch(`${API_BASE}/streams/${videoId}`);
+        const data = await res.json();
+        const audioStream = data.audioStreams.find(s => s.mimeType.includes('audio/mp4')) || data.audioStreams[0];
+        
+        audio.src = audioStream.url;
+        audio.play();
+
+        document.getElementById('nowPlayingImg').src = thumbnail;
+        document.getElementById('nowPlayingTitle').textContent = title;
+        document.getElementById('nowPlayingArtist').textContent = artist;
+        playPauseBtn.textContent = '⏸';
+
+        if ('mediaSession' in navigator) {
+          navigator.mediaSession.metadata = new MediaMetadata({
+            title: title,
+            artist: artist,
+            artwork: [{ src: thumbnail, sizes: '512x512', type: 'image/png' }]
+          });
+
+          navigator.mediaSession.setActionHandler('play', () => { audio.play(); playPauseBtn.textContent = '⏸'; });
+          navigator.mediaSession.setActionHandler('pause', () => { audio.pause(); playPauseBtn.textContent = '▶'; });
+        }
+      } catch (err) {
+        alert('Unable to load stream. Please try another track.');
+      }
+    }
+
+    playPauseBtn.addEventListener('click', () => {
+      if (audio.paused && audio.src) {
+        audio.play();
+        playPauseBtn.textContent = '⏸';
+      } else {
+        audio.pause();
+        playPauseBtn.textContent = '▶';
+      }
+    });
+  </script>
+</body>
+</html>
