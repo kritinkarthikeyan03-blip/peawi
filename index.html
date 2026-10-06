@@ -376,15 +376,12 @@
     </div>
   </div>
 
-  <audio id="audioPlayer" style="display: none;"></audio>
+  <audio id="audioPlayer" crossorigin="anonymous" style="display: none;"></audio>
 
   <script>
-    // Register Service Worker for Offline Functionality
     if ('serviceWorker' in navigator) {
       window.addEventListener('load', () => {
-        navigator.serviceWorker.register('/sw.js')
-          .then(() => console.log('ServiceWorker registered successfully'))
-          .catch(err => console.log('ServiceWorker registration failed:', err));
+        navigator.serviceWorker.register('/sw.js').catch(() => {});
       });
     }
 
@@ -412,26 +409,33 @@
     let isShuffle = false;
     let isRepeat = false;
 
+    // Updated API mirrors for improved reliability
     const API_SERVERS = [
       "https://pipedapi.kavin.rocks",
+      "https://pipedapi.mha.fi",
       "https://api.piped.private.coffee",
       "https://pipedapi.adminforge.de",
-      "https://pipedapi.mha.fi"
+      "https://pipedapi.drgns.space"
     ];
-    let currentServerIndex = 0;
 
     async function fetchWithFallback(endpoint) {
       for (let i = 0; i < API_SERVERS.length; i++) {
-        const server = API_SERVERS[(currentServerIndex + i) % API_SERVERS.length];
         try {
-          const res = await fetch(`${server}${endpoint}`);
+          const controller = new AbortController();
+          const timeoutId = setTimeout(() => controller.abort(), 4000);
+          const res = await fetch(`${API_SERVERS[i]}${endpoint}`, { signal: controller.signal });
+          clearTimeout(timeoutId);
           if (res.ok) {
-            currentServerIndex = (currentServerIndex + i) % API_SERVERS.length;
             return await res.json();
           }
         } catch (e) {}
       }
-      throw new Error("All stream servers are currently unreachable");
+      throw new Error("All stream servers are currently busy or unreachable");
+    }
+
+    // Direct fallback stream generator
+    function getDirectStreamUrl(videoId) {
+      return `https://invidious.nerdvpn.de/latest_version?id=${videoId}&itag=140`;
     }
 
     // Navigation Tabs
@@ -469,8 +473,7 @@
         }));
         displayResults(currentQueue);
       } catch (err) {
-        // Fallback to saved offline tracks if user is offline during search
-        resultsList.innerHTML = '<p class="placeholder">Offline Mode: Showing Saved Downloads</p>';
+        resultsList.innerHTML = '<p class="placeholder">Unable to connect to live servers. Showing downloaded music:</p>';
         currentQueue = downloadedTracks;
         displayResults(downloadedTracks);
       }
@@ -516,21 +519,29 @@
       });
     }
 
+    async function getAudioStreamUrl(videoId) {
+      try {
+        const data = await fetchWithFallback(`/streams/${videoId}`);
+        const audioStream = data.audioStreams.find(s => s.mimeType && s.mimeType.includes('audio/mp4')) || data.audioStreams[0];
+        if (audioStream && audioStream.url) return audioStream.url;
+      } catch (e) {}
+      return getDirectStreamUrl(videoId);
+    }
+
     // Download & Cache Audio Streams
     async function downloadTrackForOffline(track, btnElement) {
       try {
         btnElement.innerText = '⏳';
-        const data = await fetchWithFallback(`/streams/${track.videoId}`);
-        const audioStream = data.audioStreams.find(s => s.mimeType && s.mimeType.includes('audio/mp4')) || data.audioStreams[0];
+        const streamUrl = await getAudioStreamUrl(track.videoId);
 
-        if (!audioStream) throw new Error("No valid stream found");
-
-        // Save audio stream directly into Cache Storage API
+        const response = await fetch(streamUrl);
+        const blob = await response.blob();
+        
+        // Cache blob in Cache Storage
         const cache = await caches.open('spotify-audio-v1');
-        await cache.add(audioStream.url);
+        await cache.put(`/offline-audio-${track.videoId}`, new Response(blob));
 
-        // Store metadata locally
-        track.streamUrl = audioStream.url;
+        track.isOfflineReady = true;
         if (!downloadedTracks.some(d => d.videoId === track.videoId)) {
           downloadedTracks.push(track);
           localStorage.setItem('spotify_downloads', JSON.stringify(downloadedTracks));
@@ -538,9 +549,9 @@
 
         btnElement.innerText = '💾';
         btnElement.classList.add('active');
-        alert(`"${track.title}" saved for offline listening!`);
+        alert(`"${track.title}" saved for offline playback!`);
       } catch (err) {
-        alert("Failed to download audio stream for offline use.");
+        alert("Could not save track for offline use.");
         btnElement.innerText = '⬇️';
       }
     }
@@ -557,22 +568,27 @@
       currentIndex = index;
       const track = currentQueue[currentIndex];
 
+      document.getElementById('nowPlayingImg').src = track.thumbnail;
+      document.getElementById('nowPlayingTitle').textContent = track.title;
+      document.getElementById('nowPlayingArtist').textContent = track.artist;
+      playPauseBtn.textContent = '⏳';
+
       try {
-        let streamUrl = track.streamUrl;
-
-        // Fetch new stream URL if playing online and not previously cached
-        if (!streamUrl) {
-          const data = await fetchWithFallback(`/streams/${track.videoId}`);
-          const audioStream = data.audioStreams.find(s => s.mimeType && s.mimeType.includes('audio/mp4')) || data.audioStreams[0];
-          streamUrl = audioStream.url;
-        }
+        let playUrl;
         
-        audio.src = streamUrl;
-        audio.play();
+        // Check local Cache Storage first
+        const cache = await caches.open('spotify-audio-v1');
+        const offlineResponse = await cache.match(`/offline-audio-${track.videoId}`);
 
-        document.getElementById('nowPlayingImg').src = track.thumbnail;
-        document.getElementById('nowPlayingTitle').textContent = track.title;
-        document.getElementById('nowPlayingArtist').textContent = track.artist;
+        if (offlineResponse) {
+          const blob = await offlineResponse.blob();
+          playUrl = URL.createObjectURL(blob);
+        } else {
+          playUrl = await getAudioStreamUrl(track.videoId);
+        }
+
+        audio.src = playUrl;
+        await audio.play();
         playPauseBtn.textContent = '⏸';
 
         fetchLyrics(track.title, track.artist);
@@ -588,11 +604,14 @@
           navigator.mediaSession.setActionHandler('nexttrack', () => playNextTrack());
         }
       } catch (err) {
+        console.error("Playback Error:", err);
+        playPauseBtn.textContent = '▶';
+        alert("Playback error. Trying next track...");
         playNextTrack();
       }
     }
 
-    // Audio Playback & Timeline Updates
+    // Audio Playback & Progress Controls
     audio.ontimeupdate = () => {
       if (audio.duration) {
         const pct = (audio.currentTime / audio.duration) * 100;
@@ -614,7 +633,6 @@
       return `${m}:${s < 10 ? '0' : ''}${s}`;
     }
 
-    // Player Toggle Controls
     shuffleBtn.onclick = () => {
       isShuffle = !isShuffle;
       shuffleBtn.classList.toggle('active', isShuffle);
@@ -643,7 +661,6 @@
       }
     }
 
-    // Lyrics Fetcher
     async function fetchLyrics(title, artist) {
       lyricsBox.innerHTML = "Fetching karaoke lyrics...";
       try {
